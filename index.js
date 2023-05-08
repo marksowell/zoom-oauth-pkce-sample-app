@@ -6,22 +6,57 @@ const request = require('request')
 
 // Run the express app
 const express = require('express')
+const session = require('express-session')
+const crypto = require('crypto')
 const app = express()
 
+function generatePKCE() {
+    // Generate a random code_verifier
+    const code_verifier = crypto.randomBytes(32).toString('hex');
+    // Create a code_challenge based on the code_verifier
+    const code_challenge = crypto.createHash('sha256').update(code_verifier).digest('base64url');
+    return { code_verifier, code_challenge };
+}
+
+// Prototype function to convert a Base64 string to Base64Url
+Buffer.prototype.base64url = function () {
+    return this.toString('base64')
+        .replace('+', '-')
+        .replace('/', '_')
+        .replace(/=+$/, '');
+};
+
+app.use(
+    session({
+        secret: process.env.SESSION_SECRET,
+        resave: false,
+        saveUninitialized: true,
+        cookie: { secure: false },
+    })
+)
 
 app.get('/', (req, res) => {
 
     // Step 1: 
-    // Check if the code parameter is in the url 
-    // if an authorization code is available, the user has most likely been redirected from Zoom OAuth
+    // Check if the code and state parameters are in the url 
+    // if an authorization code is available and the state is valid, the user has most likely been redirected from Zoom OAuth
     // if not, the user needs to be redirected to Zoom OAuth to authorize
 
-    if (req.query.code) {
+    if (req.query.code && req.query.state) {
+        console.log('Received state:', req.query.state); // For state troubleshooting
+        console.log('Stored state:', req.session.state); // For state troubleshooting
+        if (req.query.state !== req.session.state) {
+            res.status(403).send('Invalid state');
+            return;
+        }
 
         // Step 3: 
         // Request an access token using the auth code
 
-        let url = 'https://zoom.us/oauth/token?grant_type=authorization_code&code=' + req.query.code + '&redirect_uri=' + process.env.redirectURL;
+        // Use the code_verifier stored in the session
+        const code_verifier = req.session.code_verifier;
+
+        let url = 'https://zoom.us/oauth/token?grant_type=authorization_code&code=' + req.query.code + '&redirect_uri=' + process.env.redirectURL + '&code_verifier=' + code_verifier;
 
         request.post(url, (error, response, body) => {
 
@@ -83,11 +118,18 @@ app.get('/', (req, res) => {
 
         return;
 
-    }
+    } else {
+        // Generate the code_verifier and code_challenge
+        const { code_verifier, code_challenge } = generatePKCE();
 
-    // Step 2: 
-    // If no authorization code is available, redirect to Zoom OAuth to authorize
-    res.redirect('https://zoom.us/oauth/authorize?response_type=code&client_id=' + process.env.clientID + '&redirect_uri=' + process.env.redirectURL)
+        // Store the code_verifier and a random state in the session
+        req.session.code_verifier = code_verifier;
+        req.session.state = crypto.randomBytes(16).toString('hex');
+
+        // Step 2: 
+        // If no authorization code is available, redirect to Zoom OAuth to authorize
+        res.redirect('https://zoom.us/oauth/authorize?response_type=code&client_id=' + process.env.clientID + '&redirect_uri=' + process.env.redirectURL + '&code_challenge=' + code_challenge + '&code_challenge_method=S256' + '&state=' + req.session.state)
+    }
 })
 
 app.listen(4000, () => console.log(`Zoom Hello World app listening at PORT: 4000`))
